@@ -18,21 +18,34 @@
 start_proxy
 ~~~~~~~~~~~~~~~~~
 
-This module serves as the entry point for launching a proxy server using Python's socket framework.
-It parses command-line arguments to configure the server's IP address and port, reads virtual host
-definitions from a configuration file, and initializes the proxy server with routing information.
+Entry point for launching the proxy server.  Parses command-line arguments,
+reads virtual-host definitions from ``config/proxy.conf``, and hands the
+resulting routing table to ``daemon.create_proxy``.
+
+Config format (subset of NGINX-style)::
+
+    host "192.168.56.114:8080" {
+        proxy_pass http://192.168.56.114:9000;
+    }
+
+    host "app2.local" {
+        proxy_pass http://192.168.56.114:9002;
+        proxy_pass http://192.168.56.114:9003;
+        dist_policy round-robin
+    }
+
+Returned routes dict::
+
+    {
+        "192.168.56.114:8080": ("192.168.56.114:9000", "round-robin"),
+        "app2.local":          (["192.168.56.114:9002",
+                                 "192.168.56.114:9003"], "round-robin"),
+    }
 
 Requirements:
 --------------
-- socket: provide socket networking interface.
-- threading: enables concurrent client handling via threads.
-- argparse: parses command-line arguments for server configuration.
-- re: used for regular expression matching in configuration parsing
-- response: response utilities.
-- httpadapter: the class for handling HTTP requests.
-- urlparse: parses URLs to extract host and port information.
-- daemon.create_proxy: initializes and starts the proxy server.
-
+- socket, threading, argparse, re: standard library.
+- daemon.create_proxy: initialises and starts the proxy server.
 """
 
 import socket
@@ -49,55 +62,73 @@ PROXY_PORT = 8080
 
 def parse_virtual_hosts(config_file):
     """
-    Parses virtual host blocks from a config file.
+    Parses virtual-host blocks from an NGINX-style config file and returns a
+    routing table understood by :func:`daemon.proxy.resolve_routing_policy`.
 
-    :config_file (str): Path to the NGINX config file.
-    :rtype list of dict: Each dict contains 'listen'and 'server_name'.
+    Each ``host`` block may contain:
+
+    * One or more ``proxy_pass http://HOST:PORT;`` directives.
+    * An optional ``dist_policy STRATEGY`` directive (default: ``round-robin``).
+
+    **Return format**
+
+    .. code-block:: python
+
+        {
+            hostname: (backend_or_list, policy),
+            ...
+        }
+
+    Where ``backend_or_list`` is:
+
+    * A plain ``str`` (``"HOST:PORT"``) when there is exactly one
+      ``proxy_pass`` entry.
+    * A ``list[str]`` when there are multiple ``proxy_pass`` entries.
+
+    :param config_file (str): Path to the proxy configuration file.
+    :rtype dict: Routing table ``{hostname: (backend_or_list, policy)}``.
     """
 
     with open(config_file, 'r') as f:
         config_text = f.read()
 
-    # Match each host block
-    host_blocks = re.findall(r'host\s+"([^"]+)"\s*\{(.*?)\}', config_text, re.DOTALL)
-
-    dist_policy_map = ""
+    # Match every  host "NAME" { ... }  block (DOTALL so '.' crosses newlines)
+    host_blocks = re.findall(
+        r'host\s+"([^"]+)"\s*\{(.*?)\}',
+        config_text,
+        re.DOTALL
+    )
 
     routes = {}
+
     for host, block in host_blocks:
-        proxy_map = {}
+        # ------------------------------------------------------------------ proxy_pass entries
+        # Captures the HOST:PORT part of  proxy_pass http://HOST:PORT;
+        proxy_passes = re.findall(
+            r'proxy_pass\s+http://([^\s;/]+)',
+            block
+        )
 
-        # Find all proxy_pass entries
-        proxy_passes = re.findall(r'proxy_pass\s+http://([^\s;]+);', block)
-        map = proxy_map.get(host,[])
-        map = map + proxy_passes
-        proxy_map[host] = map
+        # ------------------------------------------------------------------ dist_policy
+        policy_match = re.search(r'dist_policy\s+(\S+)', block)
+        policy = policy_match.group(1) if policy_match else 'round-robin'
 
-        # Find dist_policy if present
-        policy_match = re.search(r'dist_policy\s+(\w+)', block)
-        if policy_match:
-            dist_policy_map = policy_match.group(1)
-        else: #default policy is round_robin
-            dist_policy_map = 'round-robin'
-            
-        #
-        # @bksysnet: Build the mapping and policy
-        # TODO: this policy varies among scenarios 
-        #       the default policy is provided with one proxy_pass
-        #       In the multi alternatives of proxy_pass then
-        #       the policy is applied to identify the highes matching
-        #       proxy_pass
-        #
-        if len(proxy_map.get(host,[])) == 1:
-            routes[host] = (proxy_map.get(host,[])[0], dist_policy_map)
-        # esle if:
-        #         TODO:  apply further policy matching here
-        #
+        # ------------------------------------------------------------------ build entry
+        if len(proxy_passes) == 0:
+            print("[Config] WARNING – host '{}' has no proxy_pass, skipping".format(host))
+            continue
+        elif len(proxy_passes) == 1:
+            backend_or_list = proxy_passes[0]          # single str
         else:
-            routes[host] = (proxy_map.get(host,[]), dist_policy_map)
+            backend_or_list = proxy_passes             # list of strs
 
+        routes[host] = (backend_or_list, policy)
+
+    # Debug print
+    print("[Config] Parsed routes:")
     for key, value in routes.items():
-        print(key, value)
+        print("   '{}' → {}".format(key, value))
+
     return routes
 
 
@@ -105,22 +136,25 @@ if __name__ == "__main__":
     """
     Entry point for launching the proxy server.
 
-    This block parses command-line arguments to determine the server's IP address
-    and port. It then calls `create_backend(ip, port)` to start the RESTful
-    application server.
+    CLI arguments:
 
-    :arg --server-ip (str): IP address to bind the server (default: 127.0.0.1).
-    :arg --server-port (int): Port number to bind the server (default: 9000).
+    :arg --server-ip (str):  IP address to bind (default: 0.0.0.0).
+    :arg --server-port (int): Port to bind (default: 8080).
     """
 
-    parser = argparse.ArgumentParser(prog='Proxy', description='', epilog='Proxy daemon')
-    parser.add_argument('--server-ip', default='0.0.0.0')
-    parser.add_argument('--server-port', type=int, default=PROXY_PORT)
- 
+    parser = argparse.ArgumentParser(
+        prog='Proxy',
+        description='Start the proxy process',
+        epilog='Proxy daemon'
+    )
+    parser.add_argument('--server-ip', default='0.0.0.0',
+                        help='IP address to bind the proxy. Default is 0.0.0.0')
+    parser.add_argument('--server-port', type=int, default=PROXY_PORT,
+                        help='Port number to bind the proxy. Default is {}.'.format(PROXY_PORT))
+
     args = parser.parse_args()
     ip = args.server_ip
     port = args.server_port
 
     routes = parse_virtual_hosts("config/proxy.conf")
-
     create_proxy(ip, port, routes)
