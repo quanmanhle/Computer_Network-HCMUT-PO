@@ -96,11 +96,11 @@ python start_sampleapp.py [--server-ip <ip>] [--server-port <port>]
 ```
 - Terminal 1
 ```bash
-python python start_sampleapp.py --server-ip 127.0.0.1 --server-port 2026
+python start_sampleapp.py --server-ip 127.0.0.1 --server-port 2026
 ```
 - Terminal 2
 ```bash
-python start_sampleapp.py --server-ip 127.0.0.1 --server-port 
+python start_sampleapp.py --server-ip 127.0.0.1 --server-port 2027
 ```
 - Terminal 3
 ```bash
@@ -112,3 +112,9 @@ If no arguments are provided, the application will use the following defaults:
 * **Port:** `--server-port` defaults to `2026`
 
 # Test
+Using Postman (download app) because in this assignment we use 127.0.0.1 so we must test in localhost.
+
+## Login
+![test login api](login.png)
+## Send-peer
+![test send-peer api](send-peer.png)
