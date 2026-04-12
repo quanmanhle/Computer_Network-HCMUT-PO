@@ -90,31 +90,40 @@
 ```bash
 cd Computer_Network-HCMUT-PO/ass1/CO3094-asynaprous
 ```
-Split to 3 termninal and run
+Run this command in terminal
 ```bash
 python start_sampleapp.py [--server-ip <ip>] [--server-port <port>]
 ```
-- Terminal 1
+- Terminal 
 ```bash
-python start_sampleapp.py --server-ip 127.0.0.1 --server-port 2026
+python start_sampleapp.py --server-port 2026
 ```
-- Terminal 2
-```bash
-python start_sampleapp.py --server-ip 127.0.0.1 --server-port 2027
-```
-- Terminal 3
-```bash
-python start_sampleapp.py --server-ip 127.0.0.1 --server-port 2028
-```
+
 
 If no arguments are provided, the application will use the following defaults:
 * **IP Address:** `--server-ip` defaults to `0.0.0.0`
 * **Port:** `--server-port` defaults to `2026`
 
 # Test
-Using Postman (download app) because in this assignment we use 127.0.0.1 so we must test in localhost.
+Using Postman (download app) because in this assignment we use 127.0.0.1 so we must test in localhost. For add-list and broadcast-peer you must config your Username and Password in `httpadapter.py`
+
+    - Username: admin
+
+    - Password: 123456
+## Authorization
+![Authorization](image/Authorization.png)
 
 ## Login
-![test login api](login.png)
+![test login api](image/login.png)
 ## Send-peer
-![test send-peer api](send-peer.png)
+![test send-peer api](image/send-peer.png)
+## Add-list
+![test add-list api](image/add-list.png)
+## Connect-peer
+![test connect-peer api](image/connect-peer.png)
+## Get-list
+![test get-list api](image/get-list.png)
+## Submit-info
+![test submit-info api](image/submit-info.png)
+## Broadcast-peer
+![test broadcast-peer api](image/broadcast-peer.png)
