@@ -6,23 +6,27 @@
     <style>
         body { font-family: sans-serif; padding: 20px; background: #f4f4f4; }
         .box { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #ddd; }
-        #chat-history { height: 150px; border: 1px solid #ccc; overflow-y: auto; background: #eee; padding: 10px; }
-        .btn { padding: 5px 10px; cursor: pointer; }
+        #chat-history { height: 150px; border: 1px solid #ccc; overflow-y: auto; background: #eee; padding: 10px; margin-bottom: 10px; }
+        .btn { padding: 5px 10px; cursor: pointer; margin-right: 5px; }
+        input { padding: 5px; margin-bottom: 5px; }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
     </style>
 </head>
 <body>
     <h1>Milestone 1: P2P Chat Demo</h1>
 
     <div class="box">
-        <h3>1. Authentication (/login)</h3>
+        <h3>1. Authentication & Registration</h3>
         <input type="text" id="user" placeholder="Username">
         <input type="password" id="pass" placeholder="Password">
-        <button class="btn" onclick="doAction('/login', 'POST', {u: user.value, p: pass.value})">Login</button>
-        <button class="btn" onclick="doAction('/submit-info', 'POST', {info: 'Active'})">Submit Info</button>
+        <br>
+        <button class="btn" onclick="doAction('/login', 'POST', {username: user.value})">Login</button>
+        
+        <button class="btn" onclick="doAction('/submit-info', 'POST', {username: user.value, ip: '192.168.56.114', port: 2026})">Submit Info</button>
     </div>
 
     <div class="box">
-        <h3>2. Peer Discovery (/get-list)</h3>
+        <h3>2. Peer Discovery</h3>
         <button class="btn" onclick="doAction('/get-list', 'GET')">Refresh Peer List</button>
         <ul id="peer-list"></ul>
     </div>
@@ -32,8 +36,10 @@
         <div id="chat-history"></div>
         <input type="text" id="target" placeholder="Target Peer ID">
         <input type="text" id="msg" placeholder="Message content">
-        <button class="btn" onclick="doAction('/connect-peer', 'POST', {id: target.value})">Connect</button>
-        <button class="btn" onclick="doAction('/send-peer', 'POST', {id: target.value, m: msg.value})">Send</button>
+        <br>
+        <button class="btn" onclick="doAction('/connect-peer', 'POST', {username: user.value})">Connect</button>
+        
+        <button class="btn" onclick="doAction('/send-peer', 'POST', {sender: user.value, message: msg.value})">Send</button>
     </div>
 
     <div class="box" style="background: #333; color: #0f0;">
@@ -45,21 +51,39 @@
         async function doAction(endpoint, method, bodyData = null) {
             const consoleEl = document.getElementById('console');
             try {
-                // IMPORTANT: We use relative paths so the PROXY handles the routing
                 const options = {
                     method: method,
                     headers: { 'Content-Type': 'application/json' }
                 };
-                if (bodyData && method !== 'GET') options.body = JSON.stringify(bodyData);
+                
+                if (bodyData && method !== 'GET') {
+                    options.body = JSON.stringify(bodyData);
+                }
 
+                // Relative path used so request goes through the Proxy
                 const response = await fetch(endpoint, options);
                 const data = await response.text();
                 
                 consoleEl.textContent = `[${endpoint}] Response: ${data}`;
                 
-                if (endpoint === '/send-peer') {
-                    document.getElementById('chat-history').innerHTML += `<div><b>You:</b> ${bodyData.m}</div>`;
+                // UI Update for Peer List
+                if (endpoint === '/get-list') {
+                    const json = JSON.parse(data);
+                    const listEl = document.getElementById('peer-list');
+                    listEl.innerHTML = '';
+                    if(json.peers) {
+                        Object.keys(json.peers).forEach(p => {
+                            listEl.innerHTML += `<li>${p} (${json.peers[p].ip}:${json.peers[p].port})</li>`;
+                        });
+                    }
                 }
+
+                // UI Update for Messages
+                if (endpoint === '/send-peer' && method === 'POST') {
+                    document.getElementById('chat-history').innerHTML += `<div><b>You:</b> ${bodyData.message}</div>`;
+                    document.getElementById('msg').value = ''; // Clear input
+                }
+
             } catch (err) {
                 consoleEl.textContent = `Error: ${err.message}`;
             }
