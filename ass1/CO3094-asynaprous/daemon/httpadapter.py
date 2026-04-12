@@ -43,6 +43,12 @@ PUBLIC_PATHS = {
     "/",
     "/index.html",
     "/login.html",
+    "/chat.html",
+    "/login",
+    "/submit-info",
+    "/get-list",
+    "/connect-peer",
+    "/send-peer",
     "/static/css/styles.css",
     "/favicon.ico",
 }
