@@ -2,91 +2,157 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>HCMUT P2P Chat - Member E Demo</title>
+    <title>HCMUT P2P Chat Dashboard</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; background: #f4f4f4; }
-        .box { background: white; padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #ddd; }
-        #chat-history { height: 150px; border: 1px solid #ccc; overflow-y: auto; background: #eee; padding: 10px; margin-bottom: 10px; }
-        .btn { padding: 5px 10px; cursor: pointer; margin-right: 5px; }
-        input { padding: 5px; margin-bottom: 5px; }
-        pre { white-space: pre-wrap; word-wrap: break-word; }
+        body { font-family: 'Segoe UI', Tahoma, sans-serif; padding: 20px; background: #f0f2f5; color: #333; }
+        .dashboard { max-width: 1100px; margin: auto; display: grid; grid-template-columns: 320px 1fr; gap: 20px; }
+        .box { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h3 { margin-top: 0; color: #1a73e8; border-bottom: 1px solid #eee; padding-bottom: 10px; font-size: 1.1em; }
+        
+        /* THE CONSOLE LOG FIX */
+        .log-container {
+            background: #1e1e1e;
+            color: #4af626; /* Matrix Green */
+            padding: 15px;
+            border-radius: 8px;
+            height: 180px;
+            overflow-y: auto;
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+            white-space: pre-wrap;       /* Wraps long text to next line */
+            word-wrap: break-word;       /* Breaks long words/JSON */
+            border: 1px solid #333;
+            line-height: 1.5;
+        }
+
+        #chat-history { height: 200px; border: 1px solid #ddd; overflow-y: auto; background: #fafafa; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
+        .btn { padding: 10px; cursor: pointer; border: none; border-radius: 6px; background: #1a73e8; color: white; font-weight: bold; width: 100%; margin-bottom: 10px; transition: 0.2s; }
+        .btn:hover { background: #1557b0; opacity: 0.9; }
+        .btn-broadcast { background: #f4b400; color: #000; } /* Yellow for Broadcast */
+        .btn-secondary { background: #5f6368; }
+        
+        input, select { width: 100%; padding: 10px; margin: 5px 0 15px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+        .timestamp { color: #888; font-size: 10px; }
     </style>
 </head>
 <body>
-    <h1>Milestone 1: P2P Chat Demo</h1>
+    <h1 style="text-align:center; color: #1a73e8;">P2P Management Dashboard</h1>
+    
+    <div class="dashboard">
+        <div class="sidebar">
+            <div class="box">
+                <h3>1. Setup Session</h3>
+                <input type="text" id="username" placeholder="Username (e.g. Alice)">
+                <button class="btn" onclick="doAction('/login', 'POST', {username: username.value})">Login</button>
+                <button class="btn" style="background:#34a853" onclick="doAction('/submit-info', 'POST', {username: username.value, ip: '127.0.0.1', port: 9000})">Submit Peer Info</button>
+            </div>
 
-    <div class="box">
-        <h3>1. Authentication & Registration</h3>
-        <input type="text" id="user" placeholder="Username">
-        <input type="password" id="pass" placeholder="Password">
-        <br>
-        <button class="btn" onclick="doAction('/login', 'POST', {username: user.value})">Login</button>
-        
-        <button class="btn" onclick="doAction('/submit-info', 'POST', {username: user.value, ip: '192.168.56.114', port: 2026})">Submit Info</button>
-    </div>
+            <div class="box">
+                <h3>2. Tracker Peers</h3>
+                <button class="btn btn-secondary" onclick="doAction('/get-list', 'GET')">Refresh List</button>
+                <select id="peer-select" size="8"></select>
+            </div>
+        </div>
 
-    <div class="box">
-        <h3>2. Peer Discovery</h3>
-        <button class="btn" onclick="doAction('/get-list', 'GET')">Refresh Peer List</button>
-        <ul id="peer-list"></ul>
-    </div>
+        <div class="main">
+            <div class="box">
+                <h3>3. Communication</h3>
+                <div id="chat-history"></div>
+                <input type="text" id="msg-text" placeholder="Type your message here...">
+                
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+                    <button class="btn" onclick="sendPrivate()">Send to Selected Peer</button>
+                    <button class="btn btn-broadcast" onclick="sendBroadcast()">Broadcast to All</button>
+                </div>
+                <button class="btn btn-secondary" style="margin-top:5px;" onclick="connectPeer()">Connect to Selected</button>
+            </div>
 
-    <div class="box">
-        <h3>3. Messaging (/send-peer)</h3>
-        <div id="chat-history"></div>
-        <input type="text" id="target" placeholder="Target Peer ID">
-        <input type="text" id="msg" placeholder="Message content">
-        <br>
-        <button class="btn" onclick="doAction('/connect-peer', 'POST', {username: user.value})">Connect</button>
-        
-        <button class="btn" onclick="doAction('/send-peer', 'POST', {sender: user.value, message: msg.value})">Send</button>
-    </div>
-
-    <div class="box" style="background: #333; color: #0f0;">
-        <strong>Console Output:</strong>
-        <pre id="console">Ready...</pre>
+            <div class="box" style="background:#2d2d2d;">
+                <h3 style="color:white; border-color:#444;">System Console (Output)</h3>
+                <div id="console-log" class="log-container">Welcome. Follow the flow: Login -> Submit -> Refresh -> Send.</div>
+            </div>
+        </div>
     </div>
 
     <script>
+        function updateConsole(endpoint, message) {
+            const logEl = document.getElementById('console-log');
+            const time = new Date().toLocaleTimeString();
+            // Wrap the message in a span to ensure styling applies
+            logEl.innerHTML += `<div><span class="timestamp">[${time}]</span> <b style="color:#fff">${endpoint}</b>: ${message}</div>`;
+            logEl.scrollTop = logEl.scrollHeight; // Auto-scroll
+        }
+
         async function doAction(endpoint, method, bodyData = null) {
-            const consoleEl = document.getElementById('console');
             try {
                 const options = {
                     method: method,
                     headers: { 'Content-Type': 'application/json' }
                 };
-                
-                if (bodyData && method !== 'GET') {
-                    options.body = JSON.stringify(bodyData);
-                }
+                if (bodyData && method !== 'GET') options.body = JSON.stringify(bodyData);
 
-                // Relative path used so request goes through the Proxy
                 const response = await fetch(endpoint, options);
                 const data = await response.text();
                 
-                consoleEl.textContent = `[${endpoint}] Response: ${data}`;
+                updateConsole(endpoint, data);
                 
-                // UI Update for Peer List
+                // Logic to update the peer dropdown if we just refreshed the list
                 if (endpoint === '/get-list') {
                     const json = JSON.parse(data);
-                    const listEl = document.getElementById('peer-list');
-                    listEl.innerHTML = '';
+                    const select = document.getElementById('peer-select');
+                    select.innerHTML = '';
                     if(json.peers) {
                         Object.keys(json.peers).forEach(p => {
-                            listEl.innerHTML += `<li>${p} (${json.peers[p].ip}:${json.peers[p].port})</li>`;
+                            let opt = document.createElement('option');
+                            opt.value = p;
+                            opt.text = `${p} (${json.peers[p].ip}:${json.peers[p].port})`;
+                            select.appendChild(opt);
                         });
                     }
                 }
-
-                // UI Update for Messages
-                if (endpoint === '/send-peer' && method === 'POST') {
-                    document.getElementById('chat-history').innerHTML += `<div><b>You:</b> ${bodyData.message}</div>`;
-                    document.getElementById('msg').value = ''; // Clear input
-                }
-
             } catch (err) {
-                consoleEl.textContent = `Error: ${err.message}`;
+                updateConsole(endpoint, "System Error: " + err.message);
             }
+        }
+
+        function connectPeer() {
+            const target = document.getElementById('peer-select').value;
+            if(!target) return alert("Please select a peer from the list first!");
+            doAction('/connect-peer', 'POST', {username: target});
+        }
+
+        function sendPrivate() {
+            const msgInput = document.getElementById('msg-text');
+            const user = document.getElementById('username').value || "User";
+            const target = document.getElementById('peer-select').value;
+
+            if(!msgInput.value || !target) return alert("Select a peer AND type a message!");
+
+            const history = document.getElementById('chat-history');
+            history.innerHTML += `<div><b style="color:#1a73e8">[Private to ${target}]:</b> ${msgInput.value}</div>`;
+            history.scrollTop = history.scrollHeight;
+
+            doAction('/send-peer', 'POST', {sender: user, message: msgInput.value, target: target});
+            msgInput.value = '';
+        }
+
+        function sendBroadcast() {
+            const msgInput = document.getElementById('msg-text');
+            const user = document.getElementById('username').value || "User";
+
+            if(!msgInput.value) return alert("Type a message to broadcast!");
+
+            const history = document.getElementById('chat-history');
+            history.innerHTML += `<div><b style="color:#f4b400">[Broadcast]:</b> ${msgInput.value}</div>`;
+            history.scrollTop = history.scrollHeight;
+
+            // Matches /broadcast-peer endpoint in your sampleapp.py
+            doAction('/broadcast-peer', 'POST', {
+                sender: user, 
+                channel: "general", 
+                message: msgInput.value
+            });
+            msgInput.value = '';
         }
     </script>
 </body>
