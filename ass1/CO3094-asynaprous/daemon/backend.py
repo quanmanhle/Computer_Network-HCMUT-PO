@@ -63,7 +63,7 @@ sel = selectors.DefaultSelector()
 #   "threading"  - one thread per connection (baseline)
 #   "callback"   - event-driven via selectors (non-blocking, single-thread accept loop)
 #   "coroutine"  - asyncio async/await
-#mode_async = "threading"
+mode_async = "threading"
 #mode_async = "coroutine"
 mode_async = "callback"
 
@@ -162,8 +162,11 @@ def _accept_callback(server_sock, mask, ip, port, routes):
     conn, addr = server_sock.accept()
     print("[Backend] Selector accepted connection from {}".format(addr))
 
-    # Set client socket to non-blocking so recv() returns immediately
-    conn.setblocking(False)
+    # KHÔNG set conn.setblocking(False) ở đây —
+    # HttpAdapter trong thread dùng blocking recv(). Nếu set non-blocking
+    # thì trên Windows sẽ throw WinError 10053 ngay lập tức.
+    # Chỉ server socket cần non-blocking để selector hoạt động,
+    # client conn để blocking bình thường.
 
     # Dispatch to callback (which runs HttpAdapter in a thread)
     handle_client_callback(server_sock, ip, port, conn, addr, routes)
