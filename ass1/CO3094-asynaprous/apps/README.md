@@ -127,3 +127,23 @@ Using Postman (download app) because in this assignment we use 127.0.0.1 so we m
 ![test submit-info api](image/submit-info.png)
 ## Broadcast-peer
 ![test broadcast-peer api](image/broadcast-peer.png)
+
+#Test P2P
+
+## Register Alice and Bob to Tracker (CLient-Server Phase)
+## Alice
+![register Alice](image/1.png)
+## Bob
+![register Bob](image/2.png)
+## Check peer list on Tracker
+![check-list](image/3.png)
+## Handshake P2P (Alice connect to Bob)
+![handshacke P2P](image/4.png)
+## Check Bob connect
+![Bob connect](image/5.png)
+## Send P2P message (Alice -> Bob)
+![send P2P message](image/6.png)
+## Bob Pull
+![Bob download new message (pull)](image/7.png)
+## Pull Incremental 
+![Test pull incremental](image/8.png)
