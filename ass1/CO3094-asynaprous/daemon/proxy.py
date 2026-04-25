@@ -51,9 +51,9 @@ _rr_lock = threading.Lock()
 # Default PROXY_PASS fallback (used only when no routes dict is supplied)
 # ---------------------------------------------------------------------------
 PROXY_PASS = {
-    "192.168.56.103:8080": ('192.168.56.103', 9000),
-    "app1.local":          ('192.168.56.103', 9001),
-    "app2.local":          ('192.168.56.103', 9002),
+    "127.0.0.1:8080":      ('127.0.0.1', 9000),
+    "tracker.local":       ('127.0.0.1', 2026),
+    "peer.local":          ('127.0.0.1', 2027),
 }
 
 
@@ -131,10 +131,10 @@ def resolve_routing_policy(hostname, routes):
     .. code-block:: python
 
         routes = {
-            "192.168.56.114:8080": ("192.168.56.114:9000", "round-robin"),
-            "app1.local":          ("192.168.56.114:9001", "round-robin"),
-            "app2.local":          (["192.168.56.114:9002",
-                                     "192.168.56.114:9002"], "round-robin"),
+            "127.0.0.1:8080": ("127.0.0.1:9000", "round-robin"),
+            "tracker.local":          ("127.0.0.1:2026", "round-robin"),
+            "peer.local":          (["127.0.0.1:2027",
+                                     "127.0.0.1:2028"], "round-robin"),
         }
 
     Policy handling:
@@ -149,11 +149,22 @@ def resolve_routing_policy(hostname, routes):
     """
     print("[Proxy] resolve_routing_policy for hostname='{}'".format(hostname))
 
-    if hostname not in routes:
-        print("[Proxy] WARNING – hostname '{}' not found in routes, using fallback".format(hostname))
-        return '127.0.0.1', 9000
+    route_key = hostname
+    if route_key not in routes:
+        # Browser requests may include the port in Host, while socket tests may
+        # omit it. Try both forms before falling back to the static backend.
+        host_without_port = hostname.rsplit(':', 1)[0] if ':' in hostname else hostname
+        host_with_proxy_port = host_without_port + ':8080'
 
-    proxy_map, policy = routes[hostname]
+        if host_without_port in routes:
+            route_key = host_without_port
+        elif host_with_proxy_port in routes:
+            route_key = host_with_proxy_port
+        else:
+            print("[Proxy] WARNING – hostname '{}' not found in routes, using fallback".format(hostname))
+            return '127.0.0.1', 9000
+
+    proxy_map, policy = routes[route_key]
     print("[Proxy]   proxy_map={!r}  policy={!r}".format(proxy_map, policy))
 
     # ------------------------------------------------------------------ single backend
@@ -174,7 +185,7 @@ def resolve_routing_policy(hostname, routes):
         else:
             # Apply the distribution policy
             if policy == 'round-robin':
-                chosen = _pick_round_robin(hostname, proxy_map)
+                chosen = _pick_round_robin(route_key, proxy_map)
             else:
                 # Unknown policy: fall back to first backend
                 print("[Proxy] Unknown policy '{}', defaulting to first backend".format(policy))
