@@ -8,152 +8,377 @@
         .dashboard { max-width: 1100px; margin: auto; display: grid; grid-template-columns: 320px 1fr; gap: 20px; }
         .box { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
         h3 { margin-top: 0; color: #1a73e8; border-bottom: 1px solid #eee; padding-bottom: 10px; font-size: 1.1em; }
-        
-        /* THE CONSOLE LOG FIX */
-        .log-container {
-            background: #1e1e1e;
-            color: #4af626; /* Matrix Green */
-            padding: 15px;
-            border-radius: 8px;
-            height: 180px;
-            overflow-y: auto;
-            font-family: 'Consolas', monospace;
-            font-size: 12px;
-            white-space: pre-wrap;       /* Wraps long text to next line */
-            word-wrap: break-word;       /* Breaks long words/JSON */
-            border: 1px solid #333;
-            line-height: 1.5;
-        }
-
-        #chat-history { height: 200px; border: 1px solid #ddd; overflow-y: auto; background: #fafafa; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
+        .log-container { background: #1e1e1e; color: #4af626; padding: 15px; border-radius: 8px; height: 150px; overflow-y: auto; font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; border: 1px solid #333; line-height: 1.5; }
+        #chat-history, #p2p-history { height: 180px; border: 1px solid #ddd; overflow-y: auto; background: #fafafa; padding: 15px; border-radius: 8px; margin-bottom: 10px; }
+        #p2p-section { border: 2px solid #1a73e8; display: none; background: #f8fbff; }
         .btn { padding: 10px; cursor: pointer; border: none; border-radius: 6px; background: #1a73e8; color: white; font-weight: bold; width: 100%; margin-bottom: 10px; transition: 0.2s; }
         .btn:hover { background: #1557b0; opacity: 0.9; }
-        .btn-broadcast { background: #f4b400; color: #000; } /* Yellow for Broadcast */
+        .btn-broadcast { background: #f4b400; color: #000; }
         .btn-secondary { background: #5f6368; }
-        
         input, select { width: 100%; padding: 10px; margin: 5px 0 15px 0; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
         .timestamp { color: #888; font-size: 10px; }
+        .badge { display:inline-block; padding:2px 7px; border-radius:999px; background:#e8f0fe; color:#1a73e8; font-size:11px; margin-left:6px; }
     </style>
 </head>
 <body>
     <h1 style="text-align:center; color: #1a73e8;">P2P Management Dashboard</h1>
-    
+
     <div class="dashboard">
         <div class="sidebar">
             <div class="box">
                 <h3>1. Setup Session</h3>
-                <input type="text" id="username" placeholder="Username (e.g. Alice)">
-                <button class="btn" onclick="doAction('/login', 'POST', {username: username.value})">Login</button>
-                <button class="btn" style="background:#34a853" onclick="doAction('/submit-info', 'POST', {username: username.value, ip: '127.0.0.1', port: 9000})">Submit Peer Info</button>
+                <input type="text" id="username" placeholder="Username, e.g. viet">
+                <input type="number" id="local-port" value="2027" placeholder="Local Peer Port">
+                <button class="btn" onclick="login()">Login</button>
+                <button class="btn" style="background:#34a853" onclick="submitPeerInfo()">Submit Peer Info</button>
             </div>
 
             <div class="box">
                 <h3>2. Tracker Peers</h3>
-                <button class="btn btn-secondary" onclick="doAction('/get-list', 'GET')">Refresh List</button>
+                <button class="btn btn-secondary" onclick="refreshPeerList()">Refresh List</button>
                 <select id="peer-select" size="8"></select>
+            </div>
+
+            <div class="box">
+                <h3>3. Channels</h3>
+                <input type="text" id="channel-name" value="general" placeholder="Channel name, e.g. lab1">
+                <button class="btn" style="background:#34a853" onclick="joinChannel()">Join / Create Channel</button>
+                <select id="channel-select" size="6">
+                    <option value="general">general</option>
+                </select>
             </div>
         </div>
 
         <div class="main">
-            <div class="box">
-                <h3>3. Communication</h3>
-                <div id="chat-history"></div>
-                <input type="text" id="msg-text" placeholder="Type your message here...">
-                
-                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
-                    <button class="btn" onclick="sendPrivate()">Send to Selected Peer</button>
-                    <button class="btn btn-broadcast" onclick="sendBroadcast()">Broadcast to All</button>
+            <div id="p2p-section" class="box">
+                <h3 id="p2p-header">Direct P2P Connection</h3>
+                <div id="p2p-history"></div>
+                <div style="display:flex; gap:10px;">
+                    <input type="text" id="p2p-msg-text" placeholder="Send private message...">
+                    <button class="btn" style="width:150px" onclick="sendPrivateP2P()">Send P2P</button>
                 </div>
-                <button class="btn btn-secondary" style="margin-top:5px;" onclick="connectPeer()">Connect to Selected</button>
+            </div>
+
+            <div class="box">
+                <h3>4. Channel Broadcast</h3>
+                <div id="chat-history"></div>
+                <input type="text" id="msg-text" placeholder="Type broadcast message here...">
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+                    <button class="btn btn-broadcast" onclick="sendBroadcast()">Broadcast to Channel</button>
+                    <button class="btn btn-secondary" onclick="connectPeer()">Connect to Selected</button>
+                </div>
             </div>
 
             <div class="box" style="background:#2d2d2d;">
                 <h3 style="color:white; border-color:#444;">System Console (Output)</h3>
-                <div id="console-log" class="log-container">Welcome. Follow the flow: Login -> Submit -> Refresh -> Send.</div>
+                <div id="console-log" class="log-container">System ready.</div>
             </div>
         </div>
     </div>
 
     <script>
+        const TRACKER_BASE = 'http://tracker.local:8080';
+        let currentPartner = null;
+        let currentPartnerInfo = null;
+        let peerMap = {};
+        let channelMap = { general: { count: 0, members: {} } };
+        let lastInboxId = 0;
+
+        function getUsername() { return document.getElementById('username').value.trim(); }
+        function getLocalPort() { return parseInt(document.getElementById('local-port').value, 10); }
+        function localPeerBase() { return `http://127.0.0.1:${getLocalPort()}`; }
+        function addrOf(info) { return `${info.ip}:${info.port}`; }
+        function safeJsonParse(text) { try { return JSON.parse(text); } catch (_) { return null; } }
+
+        function getSelectedChannel() {
+            const select = document.getElementById('channel-select');
+            const input = document.getElementById('channel-name');
+            if (select && select.value) return select.value;
+            if (input && input.value.trim()) return input.value.trim();
+            return 'general';
+        }
+
         function updateConsole(endpoint, message) {
             const logEl = document.getElementById('console-log');
             const time = new Date().toLocaleTimeString();
-            // Wrap the message in a span to ensure styling applies
-            logEl.innerHTML += `<div><span class="timestamp">[${time}]</span> <b style="color:#fff">${endpoint}</b>: ${message}</div>`;
-            logEl.scrollTop = logEl.scrollHeight; // Auto-scroll
+            const msg = typeof message === 'string' ? message : JSON.stringify(message);
+            logEl.innerHTML += `<div><span class="timestamp">[${time}]</span> <b style="color:#fff">${endpoint}</b>: ${msg}</div>`;
+            logEl.scrollTop = logEl.scrollHeight;
         }
 
-        async function doAction(endpoint, method, bodyData = null) {
-            try {
-                const options = {
-                    method: method,
-                    headers: { 'Content-Type': 'application/json' }
-                };
-                if (bodyData && method !== 'GET') options.body = JSON.stringify(bodyData);
+        function appendMessageToUI(containerId, sender, text, type = 'Incoming') {
+            const history = document.getElementById(containerId);
+            if (!history) return;
+            const color = type === 'Incoming' ? '#34a853' : '#1a73e8';
+            const label = type === 'Incoming' ? 'incoming' : 'sent';
+            history.innerHTML += `<div><b style="color:${color}">[${sender}]:</b> ${text} <span class="badge">${label}</span></div>`;
+            history.scrollTop = history.scrollHeight;
+        }
 
-                const response = await fetch(endpoint, options);
-                const data = await response.text();
-                
-                updateConsole(endpoint, data);
-                
-                // Logic to update the peer dropdown if we just refreshed the list
-                if (endpoint === '/get-list') {
-                    const json = JSON.parse(data);
-                    const select = document.getElementById('peer-select');
-                    select.innerHTML = '';
-                    if(json.peers) {
-                        Object.keys(json.peers).forEach(p => {
-                            let opt = document.createElement('option');
-                            opt.value = p;
-                            opt.text = `${p} (${json.peers[p].ip}:${json.peers[p].port})`;
-                            select.appendChild(opt);
-                        });
-                    }
-                }
+        function revealP2PBox(partnerName, partnerInfo = null) {
+            currentPartner = partnerName;
+            currentPartnerInfo = partnerInfo || peerMap[partnerName] || currentPartnerInfo;
+            document.getElementById('p2p-section').style.display = 'block';
+            document.getElementById('p2p-header').innerText = 'Direct Connection: ' + partnerName;
+            updateConsole('UI', 'P2P box opened for chat with ' + partnerName);
+        }
+
+        async function request(url, method = 'GET', bodyData = null) {
+            const options = { method, headers: {} };
+            if (bodyData && method !== 'GET') {
+                options.headers['Content-Type'] = 'text/plain;charset=UTF-8';
+                options.body = JSON.stringify(bodyData);
+            }
+            const response = await fetch(url, options);
+            const text = await response.text();
+            const json = safeJsonParse(text);
+            return json || text;
+        }
+
+        async function login() {
+            const user = getUsername();
+            if (!user) return alert('Enter Username first!');
+            try {
+                const data = await request(`${TRACKER_BASE}/login`, 'POST', { username: user });
+                updateConsole('/login', data);
             } catch (err) {
-                updateConsole(endpoint, "System Error: " + err.message);
+                updateConsole('/login', 'Error: ' + err.message);
             }
         }
 
-        function connectPeer() {
-            const target = document.getElementById('peer-select').value;
-            if(!target) return alert("Please select a peer from the list first!");
-            doAction('/connect-peer', 'POST', {username: target});
+        async function submitPeerInfo() {
+            const user = getUsername();
+            const port = getLocalPort();
+            if (!user || !port) return alert('Enter Username and Port first!');
+            try {
+                const data = await request(`${TRACKER_BASE}/submit-info`, 'POST', { username: user, ip: '127.0.0.1', port });
+                updateConsole('/submit-info', data);
+                updatePeerList(data);
+                updateChannelList(data);
+                await refreshPeerList();
+            } catch (err) {
+                updateConsole('/submit-info', 'Error: ' + err.message);
+            }
         }
 
-        function sendPrivate() {
-            const msgInput = document.getElementById('msg-text');
-            const user = document.getElementById('username').value || "User";
-            const target = document.getElementById('peer-select').value;
-
-            if(!msgInput.value || !target) return alert("Select a peer AND type a message!");
-
-            const history = document.getElementById('chat-history');
-            history.innerHTML += `<div><b style="color:#1a73e8">[Private to ${target}]:</b> ${msgInput.value}</div>`;
-            history.scrollTop = history.scrollHeight;
-
-            doAction('/send-peer', 'POST', {sender: user, message: msgInput.value, target: target});
-            msgInput.value = '';
+        async function fetchTrackerState(log = false) {
+            const data = await request(`${TRACKER_BASE}/get-list`, 'GET');
+            updatePeerList(data);
+            updateChannelList(data);
+            if (log) updateConsole('/get-list', data);
+            return data;
         }
 
-        function sendBroadcast() {
-            const msgInput = document.getElementById('msg-text');
-            const user = document.getElementById('username').value || "User";
+        async function refreshPeerList() {
+            try {
+                await fetchTrackerState(true);
+            } catch (err) {
+                updateConsole('/get-list', 'Error: ' + err.message);
+            }
+        }
 
-            if(!msgInput.value) return alert("Type a message to broadcast!");
-
-            const history = document.getElementById('chat-history');
-            history.innerHTML += `<div><b style="color:#f4b400">[Broadcast]:</b> ${msgInput.value}</div>`;
-            history.scrollTop = history.scrollHeight;
-
-            // Matches /broadcast-peer endpoint in your sampleapp.py
-            doAction('/broadcast-peer', 'POST', {
-                sender: user, 
-                channel: "general", 
-                message: msgInput.value
+        function updatePeerList(data) {
+            const json = typeof data === 'string' ? safeJsonParse(data) : data;
+            const select = document.getElementById('peer-select');
+            select.innerHTML = '';
+            peerMap = {};
+            if (!json || !json.peers) return;
+            Object.keys(json.peers).forEach(name => {
+                if (name === getUsername()) return;
+                const info = json.peers[name];
+                peerMap[name] = info;
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.text = `${name} (${info.ip}:${info.port})`;
+                select.appendChild(opt);
             });
-            msgInput.value = '';
         }
+
+        function updateChannelList(data) {
+            const json = typeof data === 'string' ? safeJsonParse(data) : data;
+            if (!json || !json.channels) return;
+            channelMap = json.channels;
+            const select = document.getElementById('channel-select');
+            if (!select) return;
+            const oldValue = select.value || 'general';
+            select.innerHTML = '';
+            Object.keys(channelMap).forEach(channel => {
+                const opt = document.createElement('option');
+                const count = channelMap[channel].count || 0;
+                opt.value = channel;
+                opt.text = `${channel} (${count})`;
+                select.appendChild(opt);
+            });
+            if (channelMap[oldValue]) select.value = oldValue;
+        }
+
+        async function joinChannel() {
+            const user = getUsername();
+            const port = getLocalPort();
+            const channel = document.getElementById('channel-name').value.trim() || 'general';
+            if (!user || !port) return alert('Enter Username and Port first!');
+            try {
+                const data = await request(`${TRACKER_BASE}/add-list`, 'POST', {
+                    username: user,
+                    ip: '127.0.0.1',
+                    port,
+                    channel_name: channel
+                });
+                updateConsole('/add-list', data);
+                updatePeerList(data);
+                updateChannelList(data);
+                const select = document.getElementById('channel-select');
+                if (select) select.value = channel;
+            } catch (err) {
+                updateConsole('/add-list', 'Error: ' + err.message);
+            }
+        }
+
+        async function connectPeer() {
+            const targetName = document.getElementById('peer-select').value;
+            const targetInfo = peerMap[targetName];
+            const user = getUsername();
+            const port = getLocalPort();
+            if (!targetName || !targetInfo) return alert('Select a peer from the list!');
+            if (!user || !port) return alert('Enter Username and Port first!');
+            revealP2PBox(targetName, targetInfo);
+
+            try {
+                const data = await request(`${localPeerBase()}/connect-peer`, 'POST', {
+                    username: user,
+                    ip: '127.0.0.1',
+                    port,
+                    peer: targetName,
+                    to: addrOf(targetInfo)
+                });
+                updateConsole('/connect-peer via local peer', data);
+            } catch (err) {
+                updateConsole('/connect-peer via local peer', 'Error: ' + err.message + ' - Is peer process :' + port + ' running?');
+            }
+        }
+
+        async function sendPrivateP2P() {
+            const msgInput = document.getElementById('p2p-msg-text');
+            const user = getUsername();
+            if (!msgInput.value.trim()) return;
+            if (!currentPartner || !currentPartnerInfo) return alert('Connect to a peer first!');
+            const text = msgInput.value.trim();
+            appendMessageToUI('p2p-history', 'You', text, 'Outgoing');
+            msgInput.value = '';
+
+            try {
+                const data = await request(`${localPeerBase()}/send-peer`, 'POST', {
+                    sender: user,
+                    from: user,
+                    target: currentPartner,
+                    recipient: currentPartner,
+                    to: addrOf(currentPartnerInfo),
+                    channel: `private:${user}:${currentPartner}`,
+                    message: text,
+                    msg: text
+                });
+                updateConsole('/send-peer via local peer', data);
+            } catch (err) {
+                updateConsole('/send-peer via local peer', 'Error: ' + err.message + ' - Is peer process :' + getLocalPort() + ' running?');
+            }
+        }
+
+        async function pollForMessages() {
+            const user = getUsername();
+            const port = getLocalPort();
+            if (!user || !port) return;
+            try {
+                const data = await request(`${localPeerBase()}/send-peer`, 'POST', { action: 'pull', after_id: lastInboxId });
+                handleIncomingMessages(data);
+            } catch (_) {}
+        }
+
+        function handleIncomingMessages(data) {
+            const json = typeof data === 'string' ? safeJsonParse(data) : data;
+            if (!json) return;
+            const messages = json.messages || json.new_messages || [];
+            if (json.last_id !== undefined) lastInboxId = Math.max(lastInboxId, Number(json.last_id) || 0);
+            messages.forEach(msg => {
+                const id = Number(msg.id) || 0;
+                if (id && id <= lastInboxId && json.last_id === undefined) return;
+                if (id) lastInboxId = Math.max(lastInboxId, id);
+                const sender = msg.from || msg.sender || 'Unknown';
+                const content = msg.message || msg.msg || msg.text || '';
+                const channel = msg.channel || 'general';
+                if (!content || sender === getUsername()) return;
+                if (msg.kind === 'broadcast' || msg.target === 'ALL') {
+                    appendMessageToUI('chat-history', `${sender} @ ${channel}`, content, 'Incoming');
+                    updateConsole('Broadcast', `New message in #${channel} from ${sender}: ${content}`);
+                } else if (channel === 'general') {
+                    appendMessageToUI('chat-history', sender, content, 'Incoming');
+                } else {
+                    revealP2PBox(sender, peerMap[sender] || null);
+                    appendMessageToUI('p2p-history', sender, content, 'Incoming');
+                    updateConsole('P2P popup', `New message from ${sender}: ${content}`);
+                }
+            });
+        }
+
+        async function sendBroadcast() {
+            const msgInput = document.getElementById('msg-text');
+            const user = getUsername();
+            const text = msgInput.value.trim();
+            const channel = getSelectedChannel();
+            if (!text) return;
+            if (!user) return alert('Enter Username first!');
+
+            // Important: channel membership is stored on the tracker, not in this tab.
+            // Refresh immediately before broadcasting so the channel creator also sees
+            // peers that joined after the creator created the channel.
+            try {
+                await fetchTrackerState(false);
+            } catch (err) {
+                updateConsole('/broadcast-peer', 'Cannot refresh tracker before broadcast: ' + err.message);
+                return;
+            }
+
+            appendMessageToUI('chat-history', `You @ ${channel}`, text, 'Outgoing');
+            msgInput.value = '';
+
+            const channelInfo = channelMap[channel];
+            const members = channelInfo && channelInfo.members ? channelInfo.members : {};
+            let recipients = Object.entries(members).filter(([name, info]) => {
+                return name !== user && info && info.ip && info.port;
+            });
+
+            // Fallback: if the selected channel is missing locally for any reason,
+            // broadcast to all known peers so the demo does not silently drop messages.
+            // Normal channel flow should use the members list above.
+            if (recipients.length === 0 && channel === 'general') {
+                recipients = Object.entries(peerMap).filter(([name, info]) => {
+                    return name !== user && info && info.ip && info.port;
+                });
+            }
+
+            if (recipients.length === 0) {
+                updateConsole('/broadcast-peer', `No other members in channel ${channel}. Ask other peers to join this channel and click Refresh List.`);
+                return;
+            }
+
+            for (const [name, info] of recipients) {
+                try {
+                    const data = await request(`${localPeerBase()}/broadcast-peer`, 'POST', {
+                        sender: user,
+                        from: user,
+                        to: `${info.ip}:${info.port}`,
+                        channel: channel,
+                        message: text,
+                        msg: text
+                    });
+                    updateConsole(`/broadcast-peer #${channel} -> ${name}`, data);
+                } catch (err) {
+                    updateConsole(`/broadcast-peer #${channel} -> ${name}`, 'Error: ' + err.message);
+                }
+            }
+        }
+
+        document.getElementById('peer-select').addEventListener('dblclick', connectPeer);
+        setInterval(pollForMessages, 2000);
     </script>
 </body>
 </html>
