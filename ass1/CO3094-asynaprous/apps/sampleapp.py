@@ -1,43 +1,42 @@
 #
 # Copyright (C) 2026 pdnguyen of HCMC University of Technology VNU-HCM.
 # All rights reserved.
-# This file is part of the CO3093/CO3094 course,
-# and is released under the "MIT License Agreement". Please see the LICENSE
-# file that should have been included as part of this package.
+# This file is part of the CO3093/CO3094 course.
 #
-# AsynapRous release
-#
-# The authors hereby grant to Licensee personal permission to use
-# and modify the Licensed Source Code for the sole purpose of studying
-# while attending the course
-#
-
 
 """
-app.sampleapp
+apps.sampleapp
 ~~~~~~~~~~~~~~~~~
 
+Tracker + peer REST API for the hybrid P2P chat assignment.
+
+This version keeps the working P2P flow and adds channel-aware broadcast:
+- Tracker keeps peer metadata and channel memberships.
+- Peers send direct/private messages and broadcast messages through their own
+  local Python daemon; that daemon forwards by TCP socket to the target peer.
+- Browser JavaScript does not send peer-to-peer traffic directly to remote peers.
 """
 
-import sys
-import os
-import importlib.util
 import json
+import socket
 import time
 
-from   daemon import AsynapRous
+from daemon import AsynapRous
 
 app = AsynapRous()
 
-TRACKER_PEERS = {}   # Store list active peer (for Tracker ) Format: {"username1": {"ip": "192.168.1.2", "port": 2026}}
-CHANNELS = {"general": []}  # Save chat & message broadcast Format: {"general": [{"sender": "A", "msg": "hello"}]}
-LOCAL_INBOX = []  # Save inbox for P2P messages
+TRACKER_PEERS = {}
+CHANNELS = {
+    "general": {
+        "members": {},
+        "messages": [],
+    }
+}
+LOCAL_INBOX = []
 PEER_CONNECTIONS = {}
 INBOX_SEQ = 0
-
-
-def json_response(payload):
-    return json.dumps(payload).encode("utf-8")
+CURRENT_IP = "127.0.0.1"
+CURRENT_PORT = 0
 
 
 def now_ts():
@@ -50,104 +49,269 @@ def next_inbox_id():
     return INBOX_SEQ
 
 
-def append_local_inbox(sender, message, channel="general", target=None):
+def json_response(payload, status_code=200):
+    body = json.dumps(payload).encode("utf-8")
+    reason = "OK" if status_code == 200 else "Error"
+    headers = (
+        "HTTP/1.1 {} {}\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: {}\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Access-Control-Allow-Private-Network: true\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).format(status_code, reason, len(body))
+    return headers.encode("utf-8") + body
+
+
+def parse_body(body):
+    if isinstance(body, dict):
+        return body
+    if not body or body == "anonymous":
+        return {}
+    try:
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", errors="replace")
+        return json.loads(body)
+    except Exception as exc:
+        print("[sampleapp] JSON parsing error: {}".format(exc))
+        return {}
+
+
+def split_host_port(value):
+    """Accept '127.0.0.1:2028', {'ip':..., 'port':...}, or None."""
+    if not value:
+        return None, None
+    if isinstance(value, dict):
+        host = value.get("ip") or value.get("host")
+        port = value.get("port")
+        return host, int(port) if port else None
+    text = str(value).strip()
+    if text.startswith("http://"):
+        text = text[len("http://"):]
+    text = text.split("/", 1)[0]
+    if ":" not in text:
+        return text, None
+    host, port = text.rsplit(":", 1)
+    try:
+        return host, int(port)
+    except ValueError:
+        return host, None
+
+
+def is_local_target(host, port):
+    if not port:
+        return True
+    local_hosts = {"127.0.0.1", "localhost", "0.0.0.0", CURRENT_IP}
+    return int(port) == int(CURRENT_PORT) and (not host or host in local_hosts)
+
+
+def ensure_channel(channel):
+    """Return normalized channel record: {'members': {}, 'messages': []}."""
+    channel = channel or "general"
+    current = CHANNELS.get(channel)
+    if isinstance(current, dict) and "members" in current and "messages" in current:
+        return current
+
+    old_messages = current if isinstance(current, list) else []
+    CHANNELS[channel] = {
+        "members": {},
+        "messages": old_messages,
+    }
+    return CHANNELS[channel]
+
+
+def add_channel_member(channel, username, ip=None, port=None):
+    record = ensure_channel(channel)
+    if not username:
+        return
+    record["members"][username] = {
+        "ip": ip or "127.0.0.1",
+        "port": int(port) if port else None,
+        "last_seen": now_ts(),
+    }
+
+
+def append_channel_message(channel, message_obj):
+    record = ensure_channel(channel)
+    record["messages"].append(message_obj)
+
+
+def channel_summary():
+    summary = {}
+    for name in list(CHANNELS.keys()):
+        record = ensure_channel(name)
+        summary[name] = {
+            "count": len(record["members"]),
+            "members": record["members"],
+        }
+    return summary
+
+
+def append_local_inbox(sender, message, channel="general", target=None, kind="p2p"):
     msg = {
         "id": next_inbox_id(),
+        "from": sender,
         "sender": sender,
         "target": target,
         "channel": channel,
         "message": message,
-        "timestamp": now_ts()
+        "msg": message,
+        "kind": kind,
+        "timestamp": now_ts(),
     }
     LOCAL_INBOX.append(msg)
     return msg
 
 
-def ensure_channel(channel):
-    if channel not in CHANNELS:
-        CHANNELS[channel] = []
+def http_post_json(host, port, path, payload, timeout=5):
+    body = json.dumps(payload).encode("utf-8")
+    request = (
+        "POST {} HTTP/1.1\r\n"
+        "Host: {}:{}\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: {}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).format(path, host, port, len(body)).encode("utf-8") + body
 
-def parse_body(body):
-    """Helper function to safely parse JSON from request body"""
-    if isinstance(body, dict):
-        return body
+    response = b""
+    with socket.create_connection((host, int(port)), timeout=timeout) as sock:
+        sock.sendall(request)
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            response += chunk
 
-    if not body or body == "anonymous":
-        return {}
+    _, _, body_part = response.partition(b"\r\n\r\n")
+    text = body_part.decode("utf-8", errors="replace")
     try:
-        if isinstance(body, bytes):
-            body = body.decode('utf-8')
-        return json.loads(body)
-    except Exception as e:
-        print(f"[Error] JSON parsing error: {e}")
-        return {}
+        return json.loads(text)
+    except Exception:
+        return {"raw": text}
+
+
+def forward_to_peer(path, payload):
+    host, port = split_host_port(payload.get("to") or payload.get("peer") or payload.get("target_addr"))
+    if not host or not port:
+        return None, "Missing target address"
+
+    if is_local_target(host, port):
+        return None, None
+
+    try:
+        forwarded = dict(payload)
+        forwarded["forwarded_by"] = "{}:{}".format(CURRENT_IP, CURRENT_PORT)
+        result = http_post_json(host, port, path, forwarded)
+        return result, None
+    except Exception as exc:
+        return None, str(exc)
+
 
 @app.route('/login', methods=['POST'])
 def login(headers="guest", body="anonymous"):
     data = parse_body(body)
     username = data.get("username", "Unknown")
-    
-    print(f"[Tracker] User logged in successfully: {username}")
-    res = {"status": "success", "message": f"Welcome {username}", "token": "dummy_token"}
-    return json_response(res)
+    print("[Tracker] User logged in successfully: {}".format(username))
+    return json_response({
+        "status": "success",
+        "message": "Welcome {}".format(username),
+        "token": "dummy_token",
+    })
+
 
 @app.route('/submit-info', methods=['POST'])
 def submit_info(headers="guest", body="anonymous"):
     data = parse_body(body)
-    username = data.get("username")
-    ip = data.get("ip")
+    ip = data.get("ip") or data.get("host") or "127.0.0.1"
     port = data.get("port")
-    
-    if username and ip and port:
-        TRACKER_PEERS[username] = {"ip": ip, "port": int(port), "last_seen": now_ts()}
-        print(f"[Tracker] Registered peer: {username} at {ip}:{port}")
-        res = {"status": "success", "message": "IP/Port registration successful"}
-        return json_response(res)
-        
-    res = {"status": "error", "message": "Missing username, IP, or port"}
-    return json_response(res)
+    username = data.get("username") or ("{}:{}".format(ip, port) if port else None)
+
+    if username and port:
+        TRACKER_PEERS[username] = {
+            "ip": ip,
+            "port": int(port),
+            "last_seen": now_ts(),
+        }
+        add_channel_member("general", username, ip, port)
+        return json_response({
+            "status": "success",
+            "message": "Peer registered",
+            "peers": TRACKER_PEERS,
+            "channels": channel_summary(),
+        })
+
+    return json_response({"status": "error", "message": "Missing info"}, status_code=400)
+
 
 @app.route('/get-list', methods=['GET'])
 def get_list(headers="guest", body="anonymous"):
     print("[Tracker] A client requested the list of active peers")
-    res = {"status": "success", "peers": TRACKER_PEERS}
-    return json_response(res)
+    return json_response({
+        "status": "success",
+        "peers": TRACKER_PEERS,
+        "channels": channel_summary(),
+    })
+
 
 @app.route('/add-list', methods=['POST'])
 def add_list(headers="guest", body="anonymous"):
     data = parse_body(body)
-    channel_name = data.get("channel_name")
-    
-    if channel_name and channel_name not in CHANNELS:
-        CHANNELS[channel_name] = []
-        print(f"[Tracker] Created new chat channel: {channel_name}")
-        res = {"status": "success", "message": f"Channel {channel_name} created"}
-        return json_response(res)
-        
-    res = {"status": "error", "message": "Invalid or existing channel name"}
-    return json_response(res)
+    channel_name = data.get("channel_name") or data.get("channel") or "general"
+    username = data.get("username") or data.get("sender")
+    ip = data.get("ip") or "127.0.0.1"
+    port = data.get("port")
+
+    ensure_channel(channel_name)
+    if username:
+        add_channel_member(channel_name, username, ip, port)
+        if port:
+            TRACKER_PEERS[username] = {
+                "ip": ip,
+                "port": int(port),
+                "last_seen": now_ts(),
+            }
+
+    print("[Tracker] {} joined channel {}".format(username, channel_name))
+    return json_response({
+        "status": "success",
+        "message": "Joined channel {}".format(channel_name),
+        "channel": channel_name,
+        "peers": TRACKER_PEERS,
+        "channels": channel_summary(),
+    })
+
 
 @app.route('/connect-peer', methods=['POST'])
 def connect_peer(headers="guest", body="anonymous"):
     data = parse_body(body)
-    sender = data.get("username", "Someone")
-    sender_ip = data.get("ip")
-    sender_port = data.get("port")
+
+    forwarded_result, err = forward_to_peer('/connect-peer', data)
+    if err:
+        return json_response({"status": "error", "message": "Forward connect failed", "error": err}, status_code=500)
+    if forwarded_result is not None:
+        return json_response({"status": "success", "mode": "forward", "peer_response": forwarded_result})
+
+    sender = data.get("username") or data.get("sender") or data.get("from") or "Someone"
+    sender_ip = data.get("ip") or data.get("sender_ip")
+    sender_port = data.get("port") or data.get("sender_port")
 
     if sender_ip and sender_port:
         PEER_CONNECTIONS[sender] = {
             "ip": sender_ip,
             "port": int(sender_port),
-            "connected_at": now_ts()
+            "connected_at": now_ts(),
         }
-    
-    print(f"[P2P] Received connection request from: {sender}")
-    res = {
+
+    print("[P2P] Received connection request from: {}".format(sender))
+    return json_response({
         "status": "success",
-        "message": f"Hi {sender}, I am ready to receive messages!",
-        "connected_peers": len(PEER_CONNECTIONS)
-    }
-    return json_response(res)
+        "message": "Hi {}, peer {}:{} is ready".format(sender, CURRENT_IP, CURRENT_PORT),
+        "connected_peers": len(PEER_CONNECTIONS),
+    })
 
 
 @app.route('/connect-peer', methods=['GET'])
@@ -155,79 +319,114 @@ def get_peer_connections(headers="guest", body="anonymous"):
     return json_response({
         "status": "success",
         "connections": PEER_CONNECTIONS,
-        "count": len(PEER_CONNECTIONS)
+        "count": len(PEER_CONNECTIONS),
     })
+
 
 @app.route('/send-peer', methods=['POST'])
 def send_peer(headers="guest", body="anonymous"):
     data = parse_body(body)
 
-    # Pull mode is kept on the same public endpoint so Postman testing stays simple.
-    action = data.get("action")
-    if action == "pull":
+    if data.get("action") == "pull":
         try:
             after_id = int(data.get("after_id", 0))
         except Exception:
             after_id = 0
-
-        new_messages = [msg for msg in LOCAL_INBOX if msg.get("id", 0) > after_id]
+        messages = [msg for msg in LOCAL_INBOX if int(msg.get("id", 0)) > after_id]
         last_id = LOCAL_INBOX[-1]["id"] if LOCAL_INBOX else 0
-
         return json_response({
             "status": "success",
             "mode": "pull",
-            "messages": new_messages,
+            "messages": messages,
             "last_id": last_id,
-            "immutable": True
+            "immutable": True,
+            "peer": "{}:{}".format(CURRENT_IP, CURRENT_PORT),
         })
 
-    sender = data.get("sender", "Unknown")
-    target = data.get("target")
-    channel = data.get("channel", "general")
-    message = data.get("message", "")
+    forwarded_result, err = forward_to_peer('/send-peer', data)
+    if err:
+        return json_response({"status": "error", "message": "Forward message failed", "error": err}, status_code=500)
+    if forwarded_result is not None:
+        return json_response({"status": "success", "mode": "forward", "peer_response": forwarded_result})
 
-    ensure_channel(channel)
-    
-    print(f"\n[P2P INBOX] Received message from {sender}: {message}\n")
-    msg = append_local_inbox(sender, message, channel, target)
-    CHANNELS[channel].append({
+    sender = data.get("sender") or data.get("from") or "Unknown"
+    target = data.get("target") or data.get("recipient") or data.get("to")
+    channel = data.get("channel") or "private"
+    message = data.get("message") or data.get("msg") or data.get("text") or ""
+
+    msg = append_local_inbox(sender, message, channel, target, kind="p2p")
+    append_channel_message(channel, {
         "sender": sender,
         "target": target,
         "message": message,
         "timestamp": msg["timestamp"],
-        "kind": "p2p"
+        "kind": "p2p",
     })
-    
-    res = {
+
+    print("[P2P INBOX {}:{}] {}: {}".format(CURRENT_IP, CURRENT_PORT, sender, message))
+    return json_response({
         "status": "success",
         "message": "P2P message received",
         "mode": "push",
-        "inbox_id": msg["id"]
-    }
-    return json_response(res)
+        "inbox_id": msg["id"],
+        "peer": "{}:{}".format(CURRENT_IP, CURRENT_PORT),
+    })
+
 
 @app.route('/broadcast-peer', methods=['POST'])
 def broadcast_peer(headers="guest", body="anonymous"):
     data = parse_body(body)
-    sender = data.get("sender", "Unknown")
-    channel = data.get("channel", "general")
-    message = data.get("message", "")
 
-    ensure_channel(channel)
-    CHANNELS[channel].append({
+    forwarded_result, err = forward_to_peer('/broadcast-peer', data)
+    if err:
+        return json_response({"status": "error", "message": "Forward broadcast failed", "error": err}, status_code=500)
+    if forwarded_result is not None:
+        return json_response({"status": "success", "mode": "forward", "peer_response": forwarded_result})
+
+    sender = data.get("sender") or data.get("from") or "Unknown"
+    channel = data.get("channel") or "general"
+    message = data.get("message") or data.get("msg") or data.get("text") or ""
+
+    msg = append_local_inbox(sender, message, channel, target="ALL", kind="broadcast")
+    append_channel_message(channel, {
         "sender": sender,
         "message": message,
-        "timestamp": now_ts(),
-        "kind": "broadcast"
+        "timestamp": msg["timestamp"],
+        "kind": "broadcast",
     })
-    append_local_inbox(sender, message, channel, target="ALL")
 
-    print(f"[Broadcast - {channel}] {sender}: {message}")
-    res = {"status": "success", "message": "Broadcast message received"}
-    return json_response(res)
+    print("[Broadcast - {} on {}:{}] {}: {}".format(channel, CURRENT_IP, CURRENT_PORT, sender, message))
+    return json_response({
+        "status": "success",
+        "message": "Broadcast message received",
+        "channel": channel,
+        "inbox_id": msg["id"],
+        "peer": "{}:{}".format(CURRENT_IP, CURRENT_PORT),
+    })
+
+
+@app.route('/submit-info', methods=['OPTIONS'])
+@app.route('/add-list', methods=['OPTIONS'])
+@app.route('/connect-peer', methods=['OPTIONS'])
+@app.route('/send-peer', methods=['OPTIONS'])
+@app.route('/broadcast-peer', methods=['OPTIONS'])
+def global_preflight_handler(headers=None, body=None):
+    return (
+        "HTTP/1.1 204 No Content\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: POST, GET, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+        "Access-Control-Allow-Private-Network: true\r\n"
+        "Access-Control-Max-Age: 86400\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    ).encode("utf-8")
+
 
 def create_sampleapp(ip, port):
-    # Prepare and launch the RESTful application
+    global CURRENT_IP, CURRENT_PORT
+    CURRENT_IP = ip if ip not in ("0.0.0.0", "") else "127.0.0.1"
+    CURRENT_PORT = int(port)
+    print("[sampleapp] Starting node at {}:{}".format(CURRENT_IP, CURRENT_PORT))
     app.prepare_address(ip, port)
     app.run()
-
