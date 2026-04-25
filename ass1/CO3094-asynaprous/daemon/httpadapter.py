@@ -27,6 +27,7 @@ from .dictionary import CaseInsensitiveDict
 import asyncio
 import inspect
 import secrets
+import socket
 import time
 
 
@@ -49,10 +50,49 @@ PUBLIC_PATHS = {
     "/get-list",
     "/connect-peer",
     "/send-peer",
+    "/add-list",
+    "/broadcast-peer",
     "/static/css/styles.css",
     "/favicon.ico",
 }
 
+def read_full_http_request(conn, max_bytes=1024 * 1024):
+    """
+    Read HTTP header first, then continue reading until Content-Length bytes
+    of body are received.
+    """
+    conn.setblocking(True)
+    data = b""
+
+    while b"\r\n\r\n" not in data and len(data) < max_bytes:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+
+    if b"\r\n\r\n" not in data:
+        return data
+
+    header_part, sep, body_part = data.partition(b"\r\n\r\n")
+
+    content_length = 0
+    header_text = header_part.decode("iso-8859-1", errors="replace")
+    for line in header_text.split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            try:
+                content_length = int(line.split(":", 1)[1].strip())
+            except Exception:
+                content_length = 0
+            break
+
+    while len(body_part) < content_length and len(data) < max_bytes:
+        chunk = conn.recv(4096)
+        if not chunk:
+            break
+        body_part += chunk
+        data += chunk
+
+    return header_part + sep + body_part
 
 class HttpAdapter:
     __attrs__ = [
@@ -161,6 +201,43 @@ class HttpAdapter:
         sid = self.create_session(username)
         return True, sid
 
+    def _read_http_request(self, conn):
+        """
+        Read one complete HTTP/1.x request from a TCP socket.
+        TCP is a byte stream, so headers and JSON body may arrive separately.
+        """
+        conn.setblocking(True)
+        conn.settimeout(3)
+        data = b""
+        try:
+            while b"\r\n\r\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > 1024 * 1024:
+                    break
+            header_part, sep, body_part = data.partition(b"\r\n\r\n")
+            content_length = 0
+            try:
+                header_text = header_part.decode("iso-8859-1", errors="replace")
+                for line in header_text.split("\r\n")[1:]:
+                    if line.lower().startswith("content-length:"):
+                        content_length = int(line.split(":", 1)[1].strip())
+                        break
+            except Exception:
+                content_length = 0
+            while content_length and len(body_part) < content_length:
+                chunk = conn.recv(content_length - len(body_part))
+                if not chunk:
+                    break
+                body_part += chunk
+            return (header_part + sep + body_part).decode("utf-8", errors="ignore")
+        except socket.timeout:
+            return data.decode("utf-8", errors="ignore")
+        finally:
+            conn.settimeout(None)
+
     def handle_client(self, conn, addr, routes):
         self.conn = conn
         self.connaddr = addr
@@ -168,45 +245,61 @@ class HttpAdapter:
         resp = self.response
 
         try:
-            msg = conn.recv(4096).decode("utf-8", errors="ignore")
+            msg = self._read_http_request(conn)
             if not msg:
                 conn.close()
                 return
 
             req.prepare(msg, routes)
+
+            # --- CORS INTERCEPTION ---
+            if req.method == 'OPTIONS':
+                cors_headers = (
+                    "HTTP/1.1 204 No Content\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                    "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+                    "Access-Control-Max-Age: 86400\r\n\r\n"
+                )
+                conn.sendall(cors_headers.encode("utf-8"))
+                return # finally block will handle close
+
             print("[HttpAdapter] Invoke handle_client connection {}".format(addr))
 
             authorized, new_session_id = self._authorize(req)
             if not authorized:
                 response = resp.build_unauthorized(realm="CO3094 Chat")
                 conn.sendall(response)
-                conn.close()
                 return
 
             if req.hook:
                 payload = self._call_hook(req)
-                response = resp.build_response(
-                    req,
-                    envelop_content=payload,
-                    set_cookie=new_session_id,
-                    content_type="application/json; charset=utf-8",
-                )
+                
+                # FIX: Check if payload is already a full HTTP response (bytes starting with HTTP)
+                if isinstance(payload, bytes) and payload.startswith(b"HTTP/1.1"):
+                    response = payload
+                else:
+                    # Only build the response if the hook returned raw data/dict
+                    response = resp.build_response(
+                        req,
+                        envelop_content=payload,
+                        set_cookie=new_session_id,
+                        content_type="application/json; charset=utf-8",
+                    )
             else:
-                response = resp.build_response(
-                    req,
-                    set_cookie=new_session_id,
-                )
+                response = resp.build_response(req, set_cookie=new_session_id)
 
+            # --- THE WINERROR 10035 FIX ---
+            conn.setblocking(True) # FIX 1: Force blocking mode for the send
             conn.sendall(response)
+            time.sleep(0.02)       # FIX 2: Give Windows 20ms to flush the buffer
+
         except Exception as e:
-            print("[HttpAdapter] handle_client exception: {}".format(e))
-            try:
-                response = resp.build_server_error(str(e))
-                conn.sendall(response)
-            except Exception:
-                pass
+            # FIX 3: Ignore the 10035 warning if it still happens during close
+            if "10035" not in str(e):
+                print("[HttpAdapter] handle_client exception: {}".format(e))
         finally:
-            conn.close()
+           conn.close()
 
     async def handle_client_coroutine(self, reader, writer):
         req = self.request
@@ -223,6 +316,21 @@ class HttpAdapter:
                 return
 
             req.prepare(msg.decode("utf-8", errors="ignore"), self.routes or {})
+            
+            if req.method == 'OPTIONS':
+                cors_headers = (
+                    "HTTP/1.1 204 No Content\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                    "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+                    "Access-Control-Max-Age: 86400\r\n"
+                    "\r\n"
+                )
+                writer.write(cors_headers.encode("utf-8"))
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                return
 
             authorized, new_session_id = self._authorize(req)
             if not authorized:
