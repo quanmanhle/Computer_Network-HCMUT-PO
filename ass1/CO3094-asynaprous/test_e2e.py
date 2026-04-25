@@ -1,84 +1,116 @@
 #!/usr/bin/env python3
 #
-# test_e2e.py — End-to-end proxy test
+# test_e2e_channel.py
+# End-to-end test for CO3094 AsynapRous hybrid chat app.
 #
-# Phân biệt rõ 3 tình huống:
-#   code=-1  = không kết nối được (service không chạy, hoặc proxy không route)
-#   code=0   = kết nối được nhưng response rỗng (service chạy nhưng chưa implement response)
-#   code=2xx = hoạt động đúng
+# Expected services before running:
+#   python start_backend.py --server-ip 127.0.0.1 --server-port 9000
+#   python start_sampleapp.py --server-ip 127.0.0.1 --server-port 2026
+#   python start_sampleapp.py --server-ip 127.0.0.1 --server-port 2027
+#   python start_sampleapp.py --server-ip 127.0.0.1 --server-port 2028
+#   python start_proxy.py --server-ip 127.0.0.1 --server-port 8080
+#
+# What this test checks:
+#   1. Services are listening.
+#   2. Proxy can serve chat.html.
+#   3. Tracker can register peers and return peer/channel state.
+#   4. Direct P2P message 2027 -> 2028 works.
+#   5. Channel broadcast from 2027 to 2028 works.
 #
 
-import socket
 import json
-import sys
+import socket
+import time
 
-SERVER_IP    = "127.0.0.1"
-PROXY_PORT   = 8080
+SERVER_IP = "127.0.0.1"
+PROXY_PORT = 8080
 BACKEND_PORT = 9000
 TRACKER_PORT = 2026
-PEER1_PORT   = 2027
-PEER2_PORT   = 2028
-TIMEOUT      = 5
+PEER1_PORT = 2027
+PEER2_PORT = 2028
+TIMEOUT = 5
 
-HOST_BACKEND = "192.168.56.114:8080"
-HOST_TRACKER = "tracker.local"
-HOST_PEER    = "peer.local"
+HOST_BACKEND = "127.0.0.1:8080"
+HOST_TRACKER = "tracker.local:8080"
+HOST_PEER = "peer.local:8080"
 
-GREEN  = "\033[92m"
-RED    = "\033[91m"
+GREEN = "\033[92m"
+RED = "\033[91m"
 YELLOW = "\033[93m"
-CYAN   = "\033[96m"
-BOLD   = "\033[1m"
-DIM    = "\033[2m"
-RESET  = "\033[0m"
+CYAN = "\033[96m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RESET = "\033[0m"
 
-def _ok(msg):   print("  {}✓  {}{}".format(GREEN,  msg, RESET))
-def _warn(msg): print("  {}~  {}{}".format(YELLOW, msg, RESET))
-def _fail(msg): print("  {}✗  {}{}".format(RED,    msg, RESET))
-def _info(msg): print("  {}·  {}{}".format(DIM,    msg, RESET))
-def _head(msg): print("\n{}{}{}{}".format(BOLD, CYAN, msg, RESET))
-def _sub(msg):  print("{}{}{}".format(BOLD, msg, RESET))
+results = []
 
-results = []  # (name, status) — status: "pass" | "partial" | "fail"
+
+def _ok(msg):
+    print("  {}OK {}{}".format(GREEN, msg, RESET))
+
+
+def _warn(msg):
+    print("  {}WARN {}{}".format(YELLOW, msg, RESET))
+
+
+def _fail(msg):
+    print("  {}FAIL {}{}".format(RED, msg, RESET))
+
+
+def _info(msg):
+    print("  {}- {}{}".format(DIM, msg, RESET))
+
+
+def _head(msg):
+    print("\n{}{}{}{}".format(BOLD, CYAN, msg, RESET))
+
+
+def _sub(msg):
+    print("{}{}{}".format(BOLD, msg, RESET))
+
 
 def run(name, status, note=""):
-    """
-    status:
-      "pass"    = xanh ✓  — hoạt động đúng
-      "partial" = vàng ~  — kết nối được nhưng chưa implement response (code=0)
-      "fail"    = đỏ ✗   — không kết nối được hoặc sai hoàn toàn
-    """
     if status == "pass":
         _ok(name)
     elif status == "partial":
-        _warn("{} — {}".format(name, note))
+        _warn("{} -- {}".format(name, note))
     else:
-        _fail("{} — {}".format(name, note))
+        _fail("{} -- {}".format(name, note))
     results.append((name, status, note))
 
 
-def send_http(target_host, target_port, method, path,
-              host_header, body="", extra_headers=None):
-    """
-    Trả về (code, headers, body):
-      code=-1  = ConnectionRefused / timeout
-      code=0   = kết nối được, response rỗng
-      code=NNN = HTTP status code thật
-    """
+def check_port(host, port):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect((host, port))
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def send_http(target_host, target_port, method, path, host_header, body=b"", extra_headers=None):
+    """Return (code, headers_dict_lower, response_body_text)."""
     if extra_headers is None:
         extra_headers = {}
 
-    body_bytes = body.encode() if isinstance(body, str) else body
+    if isinstance(body, str):
+        body_bytes = body.encode("utf-8")
+    elif body is None:
+        body_bytes = b""
+    else:
+        body_bytes = body
+
     headers = {
         "Host": host_header,
         "Connection": "close",
-        "Content-Length": str(len(body_bytes)) if body_bytes else "0",
+        "Content-Length": str(len(body_bytes)),
     }
     headers.update(extra_headers)
 
     header_str = "\r\n".join("{}: {}".format(k, v) for k, v in headers.items())
-    raw = "{} {} HTTP/1.1\r\n{}\r\n\r\n".format(method, path, header_str)
-    raw = raw.encode() + (body_bytes or b"")
+    raw = "{} {} HTTP/1.1\r\n{}\r\n\r\n".format(method, path, header_str).encode("utf-8") + body_bytes
 
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -92,308 +124,251 @@ def send_http(target_host, target_port, method, path,
                 if not chunk:
                     break
                 resp += chunk
-            except (socket.timeout, OSError):
+            except socket.timeout:
                 break
         s.close()
-    except (ConnectionRefusedError, socket.timeout, OSError) as e:
-        return -1, {}, str(e)
+    except Exception as exc:
+        return -1, {}, str(exc)
 
     if not resp:
         return 0, {}, ""
 
+    header_part, _, body_part = resp.partition(b"\r\n\r\n")
+    lines = header_part.decode("iso-8859-1", errors="replace").splitlines()
+    status_line = lines[0] if lines else ""
+    parts = status_line.split()
     try:
-        header_part, _, body_part = resp.partition(b"\r\n\r\n")
-        lines = header_part.decode(errors="replace").splitlines()
-        status_line = lines[0] if lines else ""
-        parts = status_line.split()
         code = int(parts[1]) if len(parts) >= 2 else 0
-        resp_headers = {}
-        for line in lines[1:]:
-            if ":" in line:
-                k, _, v = line.partition(":")
-                resp_headers[k.strip().lower()] = v.strip()
-        return code, resp_headers, body_part.decode(errors="replace")
     except Exception:
-        return 0, {}, resp.decode(errors="replace")
+        code = 0
+
+    headers = {}
+    for line in lines[1:]:
+        if ":" in line:
+            k, _, v = line.partition(":")
+            headers[k.strip().lower()] = v.strip()
+
+    return code, headers, body_part.decode("utf-8", errors="replace")
 
 
-def is_json(text):
+def send_json(port, path, payload=None, method="POST", host_header="127.0.0.1"):
+    if payload is None:
+        body = b""
+    else:
+        body = json.dumps(payload).encode("utf-8")
+    code, headers, text = send_http(
+        SERVER_IP,
+        port,
+        method,
+        path,
+        host_header,
+        body=body,
+        extra_headers={"Content-Type": "application/json"} if body else {},
+    )
+    data = None
     try:
-        json.loads(text)
-        return bool(text.strip())
+        data = json.loads(text) if text.strip() else None
     except Exception:
-        return False
+        data = None
+    return code, headers, text, data
 
 
-def check_port(host, port):
-    try:
-        s = socket.socket()
-        s.settimeout(2)
-        s.connect((host, port))
-        s.close()
+def expect_json_ok(label, code, data, status_value="success"):
+    if code in (200, 201) and isinstance(data, dict) and data.get("status") == status_value:
+        run(label, "pass")
         return True
-    except Exception:
-        return False
+    run(label, "fail", "HTTP {} body={}".format(code, data))
+    return False
 
 
-def classify(code, body="", need_json=False):
-    """
-    Phân loại kết quả thành pass/partial/fail.
-    
-    pass    = code 2xx (và JSON nếu need_json=True)
-    partial = code=0 (kết nối được, chưa có response)
-    fail    = code=-1 (không kết nối được) hoặc code 4xx/5xx sai
-    """
-    if code == -1:
-        return "fail", "Không kết nối được — service không chạy hoặc proxy không route"
-    if code == 0:
-        return "partial", "Kết nối OK nhưng response rỗng — chưa implement response body"
-    if code in (200, 201):
-        if need_json and not is_json(body):
-            return "fail", "HTTP 200 nhưng body không phải JSON"
-        return "pass", ""
-    if code in (400, 401, 403):
-        return "partial", "HTTP {} — route đúng nhưng cần auth/fix logic".format(code)
-    if code in (404, 502, 503):
-        return "fail", "HTTP {} — route sai hoặc backend lỗi".format(code)
-    return "partial", "HTTP {} — chưa rõ".format(code)
+def get_last_id(port):
+    code, _, _, data = send_json(port, "/send-peer", {"action": "pull", "after_id": 0})
+    if code in (200, 201) and isinstance(data, dict):
+        return int(data.get("last_id", 0) or 0)
+    return 0
 
 
-# ══════════════════════════════════════════════════════════════
-_head("══ [0] SERVICE BOOT CHECK ══")
+def pull_messages(port, after_id):
+    code, _, text, data = send_json(port, "/send-peer", {"action": "pull", "after_id": after_id})
+    if not isinstance(data, dict):
+        return code, [], text, data
+    messages = data.get("messages") or data.get("new_messages") or []
+    return code, messages, text, data
 
+
+def contains_message(messages, text, sender=None, channel=None):
+    for msg in messages:
+        msg_text = str(msg.get("message") or msg.get("msg") or msg.get("text") or "")
+        msg_sender = str(msg.get("sender") or msg.get("from") or "")
+        msg_channel = str(msg.get("channel") or "")
+        if text not in msg_text:
+            continue
+        if sender is not None and msg_sender != sender:
+            continue
+        if channel is not None and msg_channel != channel:
+            continue
+        return True
+    return False
+
+
+_head("== [0] SERVICE BOOT CHECK ==")
 services = [
-    ("Backend  :9000  (static + auth)", BACKEND_PORT),
-    ("Tracker  :2026  (sampleapp)     ", TRACKER_PORT),
-    ("Peer 1   :2027                  ", PEER1_PORT),
-    ("Peer 2   :2028                  ", PEER2_PORT),
-    ("Proxy    :8080                  ", PROXY_PORT),
+    ("Backend static/auth", BACKEND_PORT),
+    ("Tracker sampleapp", TRACKER_PORT),
+    ("Peer 1 sampleapp", PEER1_PORT),
+    ("Peer 2 sampleapp", PEER2_PORT),
+    ("Proxy", PROXY_PORT),
 ]
-
-boot_ok = {}
 for name, port in services:
     alive = check_port(SERVER_IP, port)
-    boot_ok[port] = alive
-    run("Port {} – {}".format(port, name.strip()),
-        "pass" if alive else "fail",
-        note="Chưa khởi động")
+    run("Port {} - {}".format(port, name), "pass" if alive else "fail", "not running")
 
 
-# ══════════════════════════════════════════════════════════════
-_head("══ TẦNG 1: DIRECT (không qua proxy) ══")
-_info("Mục đích: xác nhận từng service NHẬN được request, dù chưa có response đầy đủ")
-_info("partial (~) = kết nối OK, service chạy, nhưng chưa implement response — cần fix sampleapp/httpadapter")
-_info("fail    (✗) = service không chạy hoặc sai hoàn toàn")
-
-
-# ─────────────────────────────
-_sub("\n[1A] Backend :9000 — static files")
-
-for path in ["/", "/index.html", "/login.html"]:
-    code, _, body = send_http(SERVER_IP, BACKEND_PORT, "GET", path, HOST_BACKEND)
-    status, note = classify(code, body)
-    run("GET {} → HTTP {}".format(path, code), status, note)
-
-
-# ─────────────────────────────
-_sub("\n[1B] Backend :9000 — POST /login (phải trả JSON)")
-
-code, _, body = send_http(SERVER_IP, BACKEND_PORT, "POST", "/login", HOST_BACKEND,
-    body=json.dumps({"username": "test", "password": "test"}),
-    extra_headers={"Content-Type": "application/json"})
-status, note = classify(code, body, need_json=True)
-run("POST /login → HTTP {} | JSON={}".format(code, is_json(body)), status, note)
-
-
-# ─────────────────────────────
-_sub("\n[1C] Tracker :2026 — 7 API routes")
-_info("Kỳ vọng: tất cả kết nối được (không fail -1), response có thể rỗng nếu chưa implement")
-
-TRACKER_ROUTES = [
-    ("POST", "/login",          json.dumps({"username": "u1", "password": "p1"}), True),
-    ("POST", "/submit-info",    json.dumps({"ip": "127.0.0.1", "port": 2027}),    False),
-    ("GET",  "/get-list",       "",                                                 True),
-    ("POST", "/add-list",       json.dumps({"peer": "127.0.0.1:2027"}),           False),
-    ("POST", "/connect-peer",   json.dumps({"peer": "127.0.0.1:2027"}),           False),
-    ("POST", "/send-peer",      json.dumps({"to": "127.0.0.1:2027","msg":"hi"}),  True),
-    ("POST", "/broadcast-peer", json.dumps({"msg": "test"}),                       False),
-]
-
-login_code, login_hdrs, _ = send_http(SERVER_IP, TRACKER_PORT, "POST", "/login",
-    HOST_TRACKER, body=json.dumps({"username":"u1","password":"p1"}),
-    extra_headers={"Content-Type": "application/json"})
-auth_cookie = login_hdrs.get("set-cookie", "")
-auth_header = {"Cookie": auth_cookie} if auth_cookie else {}
-
-for method, path, body, need_json in TRACKER_ROUTES:
-    extra = {"Content-Type": "application/json"} if body else {}
-    extra.update(auth_header)
-    code, hdrs, resp = send_http(SERVER_IP, TRACKER_PORT, method, path,
-                                  HOST_TRACKER, body=body, extra_headers=extra)
-    status, note = classify(code, resp, need_json=need_json)
-    label = "JSON" if need_json else "HTTP"
-    run("{} {} → {} {} | JSON={}".format(method, path, label, code, is_json(resp)),
-        status, note)
-
-
-# ─────────────────────────────
-_sub("\n[1D] Tracker state — submit-info → get-list")
-
-send_http(SERVER_IP, TRACKER_PORT, "POST", "/submit-info", HOST_TRACKER,
-    body=json.dumps({"ip": "127.0.0.1", "port": 9999}),
-    extra_headers={"Content-Type": "application/json", **auth_header})
-code, _, list_body = send_http(SERVER_IP, TRACKER_PORT, "GET", "/get-list",
-    HOST_TRACKER, extra_headers=auth_header)
-
-if code == -1:
-    run("Tracker state: get-list", "fail", "Không kết nối được")
-elif code == 0 or not is_json(list_body):
-    run("Tracker state: get-list trả JSON", "partial",
-        "Chưa implement response — cần fix get-list handler")
+_head("== [1] PROXY + WEB PAGE ==")
+code, _, body = send_http(SERVER_IP, PROXY_PORT, "GET", "/chat.html", HOST_BACKEND)
+if code == 200 and ("P2P" in body or "Chat" in body or "Dashboard" in body):
+    run("Proxy serves /chat.html through backend", "pass")
+elif code == 502:
+    run("Proxy serves /chat.html through backend", "fail", "502: backend 9000 is not running or proxy.conf points elsewhere")
 else:
-    try:
-        data = json.loads(list_body)
-        peers = data if isinstance(data, list) else data.get("peers", data.get("list", []))
-        found = any("9999" in str(p) for p in peers)
-        run("Tracker state: submit-info → get-list thấy peer",
-            "pass" if found else "partial",
-            note="" if found else "Peer 9999 không có trong list: {}".format(list_body[:80]))
-    except Exception:
-        run("Tracker state: parse JSON", "partial", list_body[:80])
+    run("Proxy serves /chat.html through backend", "partial", "HTTP {} len={}".format(code, len(body)))
 
 
-# ─────────────────────────────
-_sub("\n[1E] Peer instances :2027 / :2028")
+_head("== [2] TRACKER REGISTRATION + CHANNEL STATE ==")
+user1 = "e2e_viet_{}".format(int(time.time()) % 100000)
+user2 = "e2e_viet2_{}".format(int(time.time()) % 100000)
+channel = "e2e_lab_{}".format(int(time.time()) % 100000)
 
-for peer_port in [PEER1_PORT, PEER2_PORT]:
-    code, _, body = send_http(SERVER_IP, peer_port, "GET", "/", "peer.local")
-    status, note = classify(code, body)
-    run("Peer :{} → HTTP {}".format(peer_port, code), status, note)
+expect_json_ok("Tracker login user1", *send_json(TRACKER_PORT, "/login", {"username": user1})[0:4:3])
 
+code, _, _, data = send_json(TRACKER_PORT, "/submit-info", {"username": user1, "ip": SERVER_IP, "port": PEER1_PORT})
+expect_json_ok("Tracker register peer1 {}:{}".format(SERVER_IP, PEER1_PORT), code, data)
 
-# ══════════════════════════════════════════════════════════════
-_head("══ TẦNG 2: QUA PROXY :8080 ══")
-_info("Mục đích: xác nhận proxy ROUTE đúng host → đúng service")
-_info("partial (~) = proxy route đúng, nhưng backend chưa trả response")
-_info("fail    (✗) = proxy route sai hoặc không kết nối được")
+code, _, _, data = send_json(TRACKER_PORT, "/submit-info", {"username": user2, "ip": SERVER_IP, "port": PEER2_PORT})
+expect_json_ok("Tracker register peer2 {}:{}".format(SERVER_IP, PEER2_PORT), code, data)
 
+code, _, _, data = send_json(TRACKER_PORT, "/add-list", {"username": user1, "ip": SERVER_IP, "port": PEER1_PORT, "channel_name": channel})
+expect_json_ok("Tracker add peer1 to channel {}".format(channel), code, data)
 
-# ─────────────────────────────
-_sub("\n[2A] Proxy → Backend :9000 (Host: {})".format(HOST_BACKEND))
+code, _, _, data = send_json(TRACKER_PORT, "/add-list", {"username": user2, "ip": SERVER_IP, "port": PEER2_PORT, "channel_name": channel})
+expect_json_ok("Tracker add peer2 to channel {}".format(channel), code, data)
 
-for path in ["/", "/index.html", "/login.html"]:
-    code, _, body = send_http(SERVER_IP, PROXY_PORT, "GET", path, HOST_BACKEND)
-    status, note = classify(code, body)
-    # Nếu code=0: proxy route đúng (kết nối thành công), backend chưa respond — partial
-    run("Proxy: GET {} → HTTP {}".format(path, code), status, note)
+code, _, _, data = send_json(TRACKER_PORT, "/get-list", None, method="GET", host_header=HOST_TRACKER)
+if code == 200 and isinstance(data, dict) and user1 in str(data) and user2 in str(data):
+    run("Tracker get-list contains both peers", "pass")
+else:
+    run("Tracker get-list contains both peers", "fail", "HTTP {} body={}".format(code, data))
 
-code, _, body = send_http(SERVER_IP, PROXY_PORT, "POST", "/login", HOST_BACKEND,
-    body=json.dumps({"username":"test","password":"test"}),
-    extra_headers={"Content-Type": "application/json"})
-status, note = classify(code, body, need_json=True)
-run("Proxy: POST /login → JSON | HTTP {}".format(code), status, note)
-
-
-# ─────────────────────────────
-_sub("\n[2B] Proxy → Tracker :2026 (Host: {})".format(HOST_TRACKER))
-
-for method, path, body, need_json in TRACKER_ROUTES:
-    extra = {"Content-Type": "application/json"} if body else {}
-    extra.update(auth_header)
-    code, _, resp = send_http(SERVER_IP, PROXY_PORT, method, path,
-                               HOST_TRACKER, body=body, extra_headers=extra)
-    status, note = classify(code, resp, need_json=need_json)
-    run("Proxy: {} {} → HTTP {}".format(method, path, code), status, note)
+if isinstance(data, dict) and "channels" in data and channel in str(data.get("channels")):
+    run("Tracker get-list exposes channel membership", "pass")
+elif isinstance(data, dict) and "channels" not in data:
+    run("Tracker get-list exposes channel membership", "partial", "your sampleapp may not return channels in get-list")
+else:
+    run("Tracker get-list exposes channel membership", "fail", "channel not found in response")
 
 
-# ─────────────────────────────
-_sub("\n[2C] Proxy → Peer round-robin (Host: {})".format(HOST_PEER))
-_info("Gửi 4 request, proxy phải xoay vòng 2027 ↔ 2028")
+_head("== [3] DIRECT P2P MESSAGE 2027 -> 2028 ==")
+last_2028 = get_last_id(PEER2_PORT)
+private_text = "hello_private_{}".format(int(time.time()))
+code, _, _, data = send_json(
+    PEER1_PORT,
+    "/send-peer",
+    {
+        "sender": user1,
+        "from": user1,
+        "target": user2,
+        "recipient": user2,
+        "to": "{}:{}".format(SERVER_IP, PEER2_PORT),
+        "channel": "private:{}:{}".format(user1, user2),
+        "message": private_text,
+        "msg": private_text,
+    },
+)
+if code == 200 and isinstance(data, dict) and data.get("status") == "success":
+    run("Peer1 sends private message to peer2", "pass")
+else:
+    run("Peer1 sends private message to peer2", "fail", "HTTP {} body={}".format(code, data))
+
+time.sleep(0.2)
+code, messages, text, data = pull_messages(PEER2_PORT, last_2028)
+if code == 200 and contains_message(messages, private_text, sender=user1):
+    run("Peer2 inbox receives private message", "pass")
+else:
+    run("Peer2 inbox receives private message", "fail", "HTTP {} messages={} body={}".format(code, messages, text[:200]))
+
+
+_head("== [4] CHANNEL BROADCAST 2027 -> 2028 ==")
+last_2028 = get_last_id(PEER2_PORT)
+broadcast_text = "hello_channel_{}".format(int(time.time()))
+code, _, _, data = send_json(
+    PEER1_PORT,
+    "/broadcast-peer",
+    {
+        "sender": user1,
+        "from": user1,
+        "to": "{}:{}".format(SERVER_IP, PEER2_PORT),
+        "channel": channel,
+        "message": broadcast_text,
+        "msg": broadcast_text,
+    },
+)
+if code == 200 and isinstance(data, dict) and data.get("status") == "success":
+    run("Peer1 sends broadcast to channel {} via peer2 target".format(channel), "pass")
+else:
+    run("Peer1 sends broadcast to channel {} via peer2 target".format(channel), "fail", "HTTP {} body={}".format(code, data))
+
+time.sleep(0.2)
+code, messages, text, data = pull_messages(PEER2_PORT, last_2028)
+if code == 200 and contains_message(messages, broadcast_text, sender=user1, channel=channel):
+    run("Peer2 receives channel broadcast in channel {}".format(channel), "pass")
+else:
+    run("Peer2 receives channel broadcast in channel {}".format(channel), "fail", "HTTP {} messages={} body={}".format(code, messages, text[:200]))
+
+
+_head("== [5] PROXY ROUTING SMOKE TEST ==")
+code, _, body = send_http(SERVER_IP, PROXY_PORT, "GET", "/get-list", HOST_TRACKER)
+if code == 200 and "peers" in body:
+    run("Proxy routes tracker.local/get-list to tracker", "pass")
+else:
+    run("Proxy routes tracker.local/get-list to tracker", "partial", "HTTP {} body={}".format(code, body[:120]))
 
 rr_codes = []
 for i in range(4):
-    code, _, _ = send_http(SERVER_IP, PROXY_PORT, "GET", "/", HOST_PEER)
-    rr_codes.append(code)
-    _info("Request {} → HTTP {}".format(i + 1, code))
-
-# Proxy routing check: không có -1 nào = proxy route được đến peer
-routed = all(c != -1 for c in rr_codes)
-has_response = all(c not in (-1, 0) for c in rr_codes)
-
-if routed and has_response:
-    run("Proxy round-robin: route + response đúng", "pass")
-elif routed:
-    run("Proxy round-robin: route đúng (code=0, peer chưa implement response)", "partial",
-        "Codes: {}".format(rr_codes))
+    c, _, _ = send_http(SERVER_IP, PROXY_PORT, "POST", "/send-peer", HOST_PEER, json.dumps({"action": "pull", "after_id": 0}), {"Content-Type": "application/json"})
+    rr_codes.append(c)
+if all(c == 200 for c in rr_codes):
+    run("Proxy routes peer.local round-robin to peer daemons", "pass")
+elif all(c != -1 for c in rr_codes):
+    run("Proxy routes peer.local round-robin to peer daemons", "partial", "codes={}".format(rr_codes))
 else:
-    run("Proxy round-robin: FAIL — proxy không route đến peer", "fail",
-        "Codes: {} — có -1, peer chưa chạy hoặc proxy.conf sai".format(rr_codes))
+    run("Proxy routes peer.local round-robin to peer daemons", "fail", "codes={}".format(rr_codes))
 
 
-# ─────────────────────────────
-_sub("\n[2D] Unknown host — proxy không được crash")
-
-code, _, body = send_http(SERVER_IP, PROXY_PORT, "GET", "/", "unknown.local")
-run("Unknown host → proxy vẫn sống (HTTP {})".format(code),
-    "pass" if code not in (-1,) else "fail",
-    note="Proxy crash hoặc không trả lời")
-
-
-# ─────────────────────────────
-_sub("\n[2E] Full flow: login → submit-info → get-list → send-peer")
-
-steps = [
-    ("POST", "/login",       HOST_TRACKER, json.dumps({"username":"u1","password":"p1"}), True),
-    ("POST", "/submit-info", HOST_TRACKER, json.dumps({"ip":"127.0.0.1","port":2027}),    False),
-    ("GET",  "/get-list",    HOST_TRACKER, "",                                              True),
-    ("POST", "/send-peer",   HOST_TRACKER, json.dumps({"to":"127.0.0.1:2027","msg":"hi"}), True),
-]
-labels = ["login", "submit-info", "get-list", "send-peer"]
-
-flow_auth = {}
-for i, (method, path, host, body, need_json) in enumerate(steps, 1):
-    extra = {"Content-Type": "application/json"} if body else {}
-    extra.update(flow_auth)
-    code, hdrs, resp = send_http(SERVER_IP, PROXY_PORT, method, path,
-                                  host, body=body, extra_headers=extra)
-    if i == 1:
-        cookie = hdrs.get("set-cookie", "")
-        if cookie:
-            flow_auth = {"Cookie": cookie}
-    status, note = classify(code, resp, need_json=need_json)
-    run("Flow {}/4: {} {} → HTTP {}".format(i, method, path, code), status, note)
-
-
-# ══════════════════════════════════════════════════════════════
-_head("══ KẾT QUẢ ══\n")
-
-total   = len(results)
-passed  = sum(1 for _, s, _ in results if s == "pass")
+_head("== SUMMARY ==")
+total = len(results)
+passed = sum(1 for _, s, _ in results if s == "pass")
 partial = sum(1 for _, s, _ in results if s == "partial")
-failed  = sum(1 for _, s, _ in results if s == "fail")
-
-print("  Tổng   : {}".format(total))
-print("  {}✓ Pass   : {} — hoạt động đúng{}".format(GREEN,  passed,  RESET))
-print("  {}~ Partial: {} — kết nối được, chưa implement response (cần fix sampleapp/httpadapter){}".format(YELLOW, partial, RESET))
-print("  {}✗ Fail   : {} — không kết nối được hoặc route sai{}".format(RED,    failed,  RESET))
+failed = sum(1 for _, s, _ in results if s == "fail")
+print("  Total   : {}".format(total))
+print("  {}Pass    : {}{}".format(GREEN, passed, RESET))
+print("  {}Partial : {}{}".format(YELLOW, partial, RESET))
+print("  {}Fail    : {}{}".format(RED, failed, RESET))
 
 if failed:
-    print("\n{}✗ FAILED (cần fix ngay):{}".format(RED, RESET))
-    for name, s, note in results:
-        if s == "fail":
-            print("    ✗ {}  →  {}".format(name, note))
+    print("\n{}Failed checks:{}".format(RED, RESET))
+    for name, status, note in results:
+        if status == "fail":
+            print("  - {} -> {}".format(name, note))
 
 if partial:
-    print("\n{}~ PARTIAL (cần implement response):{}".format(YELLOW, RESET))
-    for name, s, note in results:
-        if s == "partial":
-            print("    ~ {}".format(name))
+    print("\n{}Partial checks:{}".format(YELLOW, RESET))
+    for name, status, note in results:
+        if status == "partial":
+            print("  - {} -> {}".format(name, note))
 
-print()
 if failed == 0 and partial == 0:
-    print("{}{}Tất cả tests PASSED ✓{}".format(BOLD, GREEN, RESET))
+    print("\n{}{}ALL TESTS PASSED{}".format(BOLD, GREEN, RESET))
 elif failed == 0:
-    print("{}Proxy/routing hoạt động đúng. {} items cần implement response trong sampleapp/httpadapter.{}".format(YELLOW, partial, RESET))
+    print("\n{}No hard failures, but some checks need review.{}".format(YELLOW, RESET))
 else:
-    print("{}{}✗ Fail: {} — cần fix ngay trước khi tiếp tục.{}".format(BOLD, RED, failed, RESET))
-print()
+    print("\n{}{}Some tests failed. Fix these before demo.{}".format(BOLD, RED, RESET))
